@@ -122,7 +122,7 @@ class ParallelEmbedding(nn.Module):
         y = F.embedding(x, self.weight)
         if world_size > 1:
             y[mask] = 0
-            dist.all_reduce(y)
+            dist.all_reduce(y) #//(sf): 默认求和，每个进程得到相同的y
         return y
 
 
@@ -710,7 +710,7 @@ class Block(nn.Module):
         """
         super().__init__()
         self.attn = MLA(args)
-        self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args)
+        self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args) #//(sf): args.n_dense_layers的取值1、3，而args.n_layers的取值一般要大很多
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
 
@@ -757,7 +757,7 @@ class Transformer(nn.Module):
         Linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else torch.bfloat16
         super().__init__()
         self.max_seq_len = args.max_seq_len
-        self.embed = ParallelEmbedding(args.vocab_size, args.dim)
+        self.embed = ParallelEmbedding(args.vocab_size, args.dim) #//(sf): 每个进程只保存了部分词表
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.n_layers):
             self.layers.append(Block(layer_id, args))
@@ -777,12 +777,12 @@ class Transformer(nn.Module):
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
-        seqlen = tokens.size(1)
-        h = self.embed(tokens)
+        seqlen = tokens.size(1) #//(sf):
+        h = self.embed(tokens) #//(sf): tokens: [B, L] --> h: [B, seqlen, Dim]
         freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
         mask = None
         if seqlen > 1:
-            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
+            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1) #//(sf): 设置掩码：主对角线以上元素-inf,其它置0
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
         h = self.norm(h)[:, -1]
