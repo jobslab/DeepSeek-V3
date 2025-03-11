@@ -778,7 +778,7 @@ class Transformer(nn.Module):
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
         seqlen = tokens.size(1) #//(sf):
-        h = self.embed(tokens) #//(sf): tokens: [B, L] --> h: [B, seqlen, Dim]
+        h = self.embed(tokens) #//(sf): tokens: [B, seqlen] --> h: [B, seqlen, Dim]
         freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
         mask = None
         if seqlen > 1:
@@ -786,7 +786,7 @@ class Transformer(nn.Module):
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
         h = self.norm(h)[:, -1]
-        logits = self.head(h)
+        logits = self.head(h) #//(sf): self.head是一个列并行乘法，计算得到的logits的shape是[B, seqlen, vocab_size/world_size]
         if world_size > 1:
             all_logits = [torch.empty_like(logits) for _ in range(world_size)]
             dist.all_gather(all_logits, logits)
