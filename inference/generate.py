@@ -116,7 +116,7 @@ def main(
         model = Transformer(args)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
     tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
-    load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
+    load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors")) #//(sf): 每个进程都要创建模型对象，但只加载各自的权重
 
     if interactive:
         messages = []

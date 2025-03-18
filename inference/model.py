@@ -384,8 +384,8 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
         torch.Tensor: Tensor with rotary embeddings applied.
     """
     dtype = x.dtype
-    x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
-    freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
+    x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2)) #//(sf): 在调整前，x的shape是：[B, seqlen, self.n_heads/world_size, self.qk_rope_head_dim]
+    freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1)) #//(sf): 在调整前，freqs_cis的shape是[seqlen, dim//2]
     y = torch.view_as_real(x * freqs_cis).flatten(3)
     return y.to(dtype)
 
@@ -409,8 +409,8 @@ class MLA(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.dim = args.dim
-        self.n_heads = args.n_heads
-        self.n_local_heads = args.n_heads // world_size
+        self.n_heads = args.n_heads                     #//(sf): n_heads是所有进程中加起来的头数,例如128
+        self.n_local_heads = args.n_heads // world_size #//(sf):
         self.q_lora_rank = args.q_lora_rank
         self.kv_lora_rank = args.kv_lora_rank
         self.qk_nope_head_dim = args.qk_nope_head_dim
@@ -453,14 +453,14 @@ class MLA(nn.Module):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        bsz, seqlen, _ = x.size()
+        bsz, seqlen, _ = x.size()     #//(sf): x: [B, seqlen, dim]; mask: [B, seqlen, seqlen]
         end_pos = start_pos + seqlen
-        if self.q_lora_rank == 0:
-            q = self.wq(x)
+        if self.q_lora_rank == 0:     #//(sf): 值为0，表示不使用低秩分解，MLA退化成普通的MHA
+            q = self.wq(x)            #//(sf): wq是列并行矩阵乘法，此处q：[B, seqlen, self.n_heads*self.qk_head_dim/world_size]
         else:
             q = self.wq_b(self.q_norm(self.wq_a(x)))
-        q = q.view(bsz, seqlen, self.n_local_heads, self.qk_head_dim)
-        q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q = q.view(bsz, seqlen, self.n_local_heads, self.qk_head_dim) #//(sf): q变换后：[B, seqlen, self.n_heads/world_size, self.qk_head_dim]
+        q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1) #//(sf): 分拆后，q_nope: [B, seqlen, self.n_heads/world_size, self.qk_nope_head_dim], q_pe: [...]
         q_pe = apply_rotary_emb(q_pe, freqs_cis)
         kv = self.wkv_a(x)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
@@ -474,7 +474,7 @@ class MLA(nn.Module):
             self.k_cache[:bsz, start_pos:end_pos] = k
             self.v_cache[:bsz, start_pos:end_pos] = v
             scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
-        else:
+        else: #//(sf): absorb
             wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size) 
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
             q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
@@ -483,8 +483,8 @@ class MLA(nn.Module):
             scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos]) +
                       torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
         if mask is not None:
-            scores += mask.unsqueeze(1)
-        scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
+            scores += mask.unsqueeze(1) #//(sf): 
+        scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x) #//(sf): scores: [B, n_local_heads, seqlen, seqlen]
         if attn_impl == "naive":
             x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bsz, :end_pos])
         else:
@@ -570,7 +570,7 @@ class Gate(nn.Module):
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: Routing weights and selected expert indices.
         """
-        scores = linear(x, self.weight)
+        scores = linear(x, self.weight) #//(sf): x：[B*seqlen, dim], self.weight: [n_routed_experts, dim] --> scores: [B*seqlen, n_routed_experts]; 假定n_routed_experts=256
         if self.score_func == "softmax":
             scores = scores.softmax(dim=-1, dtype=torch.float32)
         else:
@@ -578,21 +578,21 @@ class Gate(nn.Module):
         original_scores = scores
         if self.bias is not None:
             scores = scores + self.bias
-        if self.n_groups > 1:
-            scores = scores.view(x.size(0), self.n_groups, -1)
+        if self.n_groups > 1: #//(sf): n_expert_groups=8
+            scores = scores.view(x.size(0), self.n_groups, -1) #//(sf): scores: [B*seqlen, n_groups, n_routed_experts/n_groups]
             if self.bias is None:
                 group_scores = scores.amax(dim=-1)
             else:
-                group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1)
-            indices = group_scores.topk(self.topk_groups, dim=-1)[1]
-            mask = scores.new_ones(x.size(0), self.n_groups, dtype=bool).scatter_(1, indices, False)
-            scores = scores.masked_fill_(mask.unsqueeze(-1), float("-inf")).flatten(1)
+                group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1) #//(sf): group_scores: [B*seqlen, n_groups]
+            indices = group_scores.topk(self.topk_groups, dim=-1)[1] #//(sf): indices: [B*seqlen, topk_groups]，这里topk_groups要比n_groups小
+            mask = scores.new_ones(x.size(0), self.n_groups, dtype=bool).scatter_(1, indices, False) #//(sf): 根据scores.new_ones创建的tensor其形状是[B*seqlen, n_groups]
+            scores = scores.masked_fill_(mask.unsqueeze(-1), float("-inf")).flatten(1) #//(sf): 在flatten之前，scores的shape是[B*seqlen, n_groups, n_routed_experts/n_groups]，每一group内只保留
         indices = torch.topk(scores, self.topk, dim=-1)[1]
         weights = original_scores.gather(1, indices)
         if self.score_func == "sigmoid":
             weights /= weights.sum(dim=-1, keepdim=True)
-        weights *= self.route_scale
-        return weights.type_as(x), indices
+        weights *= self.route_scale 
+        return weights.type_as(x), indices #//(sf): weights & indices: [B*seqlen, topk=n_activated_experts]; 它们记录了每个token激活了哪些专家且专家的权重
 
 
 class Expert(nn.Module):
@@ -673,9 +673,9 @@ class MoE(nn.Module):
         Returns:
             torch.Tensor: Output tensor after expert routing and computation.
         """
-        shape = x.size()
-        x = x.view(-1, self.dim)
-        weights, indices = self.gate(x)
+        shape = x.size() #//(sf): x: [B, seqlen, dim]
+        x = x.view(-1, self.dim) #//(sf): x: [B*seqlen, dim]
+        weights, indices = self.gate(x) #//(sf): weights和indices的shape都是[B*seqlen, n_activated_experts]
         y = torch.zeros_like(x)
         counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
         for i in range(self.experts_start_idx, self.experts_end_idx):
@@ -684,10 +684,10 @@ class MoE(nn.Module):
             expert = self.experts[i]
             idx, top = torch.where(indices == i)
             y[idx] += expert(x[idx]) * weights[idx, top, None]
-        z = self.shared_experts(x)
+        z = self.shared_experts(x) #//(sf): x: [B*seqlen, dim], z: 
         if world_size > 1:
             dist.all_reduce(y)
-        return (y + z).view(shape)
+        return (y + z).view(shape) #//(sf): 返回结果的shape是[B, seqlen, dim]
 
 
 class Block(nn.Module):
@@ -785,8 +785,8 @@ class Transformer(nn.Module):
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1) #//(sf): 设置掩码：主对角线以上元素-inf,其它置0
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
-        h = self.norm(h)[:, -1]
-        logits = self.head(h) #//(sf): self.head是一个列并行乘法，计算得到的logits的shape是[B, seqlen, vocab_size/world_size]
+        h = self.norm(h)[:, -1] #//(sf): h的shape的先后变化情况：[B, seqlen, dim] --> [B, dim]
+        logits = self.head(h)   #//(sf): self.head是一个列并行乘法，计算得到的logits的shape是[B, vocab_size/world_size]
         if world_size > 1:
             all_logits = [torch.empty_like(logits) for _ in range(world_size)]
             dist.all_gather(all_logits, logits)
