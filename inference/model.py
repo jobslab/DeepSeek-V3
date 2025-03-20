@@ -526,6 +526,10 @@ class MLP(nn.Module):
         Returns:
             torch.Tensor: Output tensor after MLP computation.
         """
+        #//(sf): 以下详细分析输出的shape:
+        #//(sf): 0. x的shape是[B, seqlen, dim]
+        #//(sf): 1. self.w1和self.w2的weight的shape是[inter_dim//world_size, dim]，相乘后输出shape是[B, seqlen, inter_dim//world_size] 
+        #//(sf): 2. self.w2.weght的shape是[inter_dim//world_size, dim], 相乘后输出shape是[B, seqlen, dim]
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
