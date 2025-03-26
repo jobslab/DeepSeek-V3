@@ -57,13 +57,13 @@ def generate(
     prev_pos = 0
     finished = torch.tensor([False] * len(prompt_tokens), device="cuda")
     prompt_mask = tokens != -1
-    for cur_pos in range(min(prompt_lens), total_len):
-        logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos) #//: 这是预测的部分，每次的输入是prev_pos~cur_pos这一段做为输入。
+    for cur_pos in range(min(prompt_lens), total_len): #//(sf): 每次只后移一个token
+        logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos) #//(sf): 第一次处理尽可能多的token，此后每次只处理一个token
         if temperature > 0:
             next_token = sample(logits, temperature)
         else:
             next_token = logits.argmax(dim=-1)
-        next_token = torch.where(prompt_mask[:, cur_pos], tokens[:, cur_pos], next_token) #// prompt_mask值为True, 取原来的token，否则取预测出来的token
+        next_token = torch.where(prompt_mask[:, cur_pos], tokens[:, cur_pos], next_token) #//(sf): 当prompt_mask仍然为True是，仍然取原有的token，否则取预测的token
         tokens[:, cur_pos] = next_token
         finished |= torch.logical_and(~prompt_mask[:, cur_pos], next_token == eos_id)
         prev_pos = cur_pos

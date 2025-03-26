@@ -227,7 +227,7 @@ class ColumnParallelLinear(Linear):
         Returns:
             torch.Tensor: Transformed tensor with column-parallel computation.
         """
-        y = linear(x, self.weight, self.bias)
+        y = linear(x, self.weight, self.bias) #//(sf): self.weight的shape是[out_features//world_size, in_features], 若x: [B, seqlen, dim],则y: [B, seqlen, dim//world_size]
         return y
 
 
@@ -305,7 +305,7 @@ def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
     seqlen = args.max_seq_len
     beta_fast = args.beta_fast
     beta_slow = args.beta_slow
-    base = args.rope_theta
+    base = args.rope_theta      #//(sf):
     factor = args.rope_factor
 
     def find_correction_dim(num_rotations, dim, base, max_seq_len):
@@ -415,11 +415,11 @@ class MLA(nn.Module):
         self.kv_lora_rank = args.kv_lora_rank
         self.qk_nope_head_dim = args.qk_nope_head_dim
         self.qk_rope_head_dim = args.qk_rope_head_dim
-        self.qk_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim
+        self.qk_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim #//(sf): 192 = 128 + 64
         self.v_head_dim = args.v_head_dim
 
         if self.q_lora_rank == 0:
-            self.wq = ColumnParallelLinear(self.dim, self.n_heads * self.qk_head_dim)
+            self.wq = ColumnParallelLinear(self.dim, self.n_heads * self.qk_head_dim) #//(sf): dim: 7168, inter_dim = 128 * 192 = 24576
         else:
             self.wq_a = Linear(self.dim, self.q_lora_rank)
             self.q_norm = RMSNorm(self.q_lora_rank)
@@ -455,26 +455,26 @@ class MLA(nn.Module):
         """
         bsz, seqlen, _ = x.size()     #//(sf): x: [B, seqlen, dim]; mask: [B, seqlen, seqlen]
         end_pos = start_pos + seqlen
-        if self.q_lora_rank == 0:     #//(sf): 值为0，表示不使用低秩分解，MLA退化成普通的MHA
-            q = self.wq(x)            #//(sf): wq是列并行矩阵乘法，此处q：[B, seqlen, self.n_heads*self.qk_head_dim/world_size]
+        if self.q_lora_rank == 0:
+            q = self.wq(x)            #//(sf): q: [B, seqlen, n_heads * qk_head_dim // world_size]
         else:
             q = self.wq_b(self.q_norm(self.wq_a(x)))
-        q = q.view(bsz, seqlen, self.n_local_heads, self.qk_head_dim) #//(sf): q变换后：[B, seqlen, self.n_heads/world_size, self.qk_head_dim]
-        q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1) #//(sf): 分拆后，q_nope: [B, seqlen, self.n_heads/world_size, self.qk_nope_head_dim], q_pe: [...]
-        q_pe = apply_rotary_emb(q_pe, freqs_cis)
-        kv = self.wkv_a(x)
+        q = q.view(bsz, seqlen, self.n_local_heads, self.qk_head_dim) #//(sf): 这里是n_local_heads，n_local_heads = n_heads//world_size
+        q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1) #//(sf): q_nope: [B, seqlen, n_local_heads, qk_nope_head_dim], q_pe: [B, seqlen, n_local_heads, qk_rope_head_dim]
+        q_pe = apply_rotary_emb(q_pe, freqs_cis) #//(sf): q_pe: [B, seqlen, n_local_heads, qk_rope_head_dim]
+        kv = self.wkv_a(x) #//(sf): kv: [B, seqlen, kv_rola_rank + qk_rope_head_dim]
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)
         if attn_impl == "naive":
-            q = torch.cat([q_nope, q_pe], dim=-1)
+            q = torch.cat([q_nope, q_pe], dim=-1) #//(sf): Query: [B, seqlen, n_local_heads, (qk_nope_head_dim + qk_rope_head_dim)]
             kv = self.wkv_b(self.kv_norm(kv))
             kv = kv.view(bsz, seqlen, self.n_local_heads, self.qk_nope_head_dim + self.v_head_dim)
             k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
             self.k_cache[:bsz, start_pos:end_pos] = k
             self.v_cache[:bsz, start_pos:end_pos] = v
-            scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
-        else: #//(sf): absorb
+            scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale #//(sf): scores: [B, seqlen, n_local_heads, end_pos]
+        else:
             wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size) 
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
             q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
@@ -483,14 +483,14 @@ class MLA(nn.Module):
             scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos]) +
                       torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
         if mask is not None:
-            scores += mask.unsqueeze(1) #//(sf): 
-        scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x) #//(sf): scores: [B, n_local_heads, seqlen, seqlen]
+            scores += mask.unsqueeze(1) #//(sf): mask.unsqueeze(1): [seqlen, 1, seqlen], scores: [B, seqlen, n_local_heads, seqlen] ?
+        scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
         if attn_impl == "naive":
             x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bsz, :end_pos])
         else:
             x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
             x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
-        x = self.wo(x.flatten(2))
+        x = self.wo(x.flatten(2)) #//(sf): 这里的wo是一个RowParallelLinear，会对计算结果执行all_gather，使得每个进程中的x值一样，且shape是[B, seqlen, dim]
         return x
 
 
@@ -579,17 +579,17 @@ class Gate(nn.Module):
             scores = scores.softmax(dim=-1, dtype=torch.float32)
         else:
             scores = scores.sigmoid()
-        original_scores = scores
+        original_scores = scores #//(sf): 在下面的计算中，scores可能指向新的Tensor
         if self.bias is not None:
             scores = scores + self.bias
-        if self.n_groups > 1: #//(sf): n_expert_groups=8
-            scores = scores.view(x.size(0), self.n_groups, -1) #//(sf): scores: [B*seqlen, n_groups, n_routed_experts/n_groups]
+        if self.n_groups > 1: #//(sf): n_experts_groups=8
+            scores = scores.view(x.size(0), self.n_groups, -1) #//(sf): scores: [B*seqlen, self.n_groups, self.n_routed_experts//self.n_groups]
             if self.bias is None:
                 group_scores = scores.amax(dim=-1)
             else:
-                group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1) #//(sf): group_scores: [B*seqlen, n_groups]
-            indices = group_scores.topk(self.topk_groups, dim=-1)[1] #//(sf): indices: [B*seqlen, topk_groups]，这里topk_groups要比n_groups小
-            mask = scores.new_ones(x.size(0), self.n_groups, dtype=bool).scatter_(1, indices, False) #//(sf): 根据scores.new_ones创建的tensor其形状是[B*seqlen, n_groups]
+                group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1) #//(sf): group_scores: [B*seqlen, self.n_groups]，每组的前两个专家的分数之和 
+            indices = group_scores.topk(self.topk_groups, dim=-1)[1] #//(sf): indices: [B*seqlen, top_groups], 
+            mask = scores.new_ones(x.size(0), self.n_groups, dtype=bool).scatter_(1, indices, False) #//(sf): mask: [B*seqlen, n_groups]，将分数最高的n_group组置为False，从而在后面的masked_fill_中保留下来
             scores = scores.masked_fill_(mask.unsqueeze(-1), float("-inf")).flatten(1) #//(sf): 在flatten之前，scores的shape是[B*seqlen, n_groups, n_routed_experts/n_groups]，每一group内只保留
         indices = torch.topk(scores, self.topk, dim=-1)[1]
         weights = original_scores.gather(1, indices)
@@ -714,7 +714,7 @@ class Block(nn.Module):
         """
         super().__init__()
         self.attn = MLA(args)
-        self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args) #//(sf): args.n_dense_layers的取值1、3，而args.n_layers的取值一般要大很多
+        self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args) #//(sf): 前3层是MLP，后58层是MoE
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
 
@@ -789,8 +789,8 @@ class Transformer(nn.Module):
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1) #//(sf): 设置掩码：主对角线以上元素-inf,其它置0
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
-        h = self.norm(h)[:, -1] #//(sf): h的shape的先后变化情况：[B, seqlen, dim] --> [B, dim]
-        logits = self.head(h)   #//(sf): self.head是一个列并行乘法，计算得到的logits的shape是[B, vocab_size/world_size]
+        h = self.norm(h)[:, -1] #//(sf): h的shape从[B, seqlen, dim]变成[B, dim]，只取最后一个，这是因为从[t1, t2, ... tn]输出[t2, t3, ..., tn, tn+1]，最后一个是下一个预测的token
+        logits = self.head(h)   #//(sf); logits: [B, vocab_size//world_size]
         if world_size > 1:
             all_logits = [torch.empty_like(logits) for _ in range(world_size)]
             dist.all_gather(all_logits, logits)
