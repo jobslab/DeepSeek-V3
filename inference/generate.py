@@ -50,13 +50,13 @@ def generate(
     """
     prompt_lens = [len(t) for t in prompt_tokens]
     assert max(prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
-    total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
-    tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device="cuda")
+    total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens)) #//取最小值，针对短输入，可以节省资源
+    tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device="cuda") #// tokens shape: [B, total_len]
     for i, t in enumerate(prompt_tokens):
         tokens[i, :len(t)] = torch.tensor(t, dtype=torch.long, device="cuda") #//填充每句的输入
     prev_pos = 0
     finished = torch.tensor([False] * len(prompt_tokens), device="cuda")
-    prompt_mask = tokens != -1
+    prompt_mask = tokens != -1 #//(sf): prompt_mask: [B, total_len]
     for cur_pos in range(min(prompt_lens), total_len): #//(sf): 每次只后移一个token
         logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos) #//(sf): 第一次处理尽可能多的token，此后每次只处理一个token
         if temperature > 0:

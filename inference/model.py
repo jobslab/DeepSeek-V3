@@ -410,7 +410,7 @@ class MLA(nn.Module):
         super().__init__()
         self.dim = args.dim
         self.n_heads = args.n_heads                     #//(sf): n_heads是所有进程中加起来的头数,例如128
-        self.n_local_heads = args.n_heads // world_size #//(sf):
+        self.n_local_heads = args.n_heads // world_size #//(sf): 假定world_size=128，那么n_local_heads=1
         self.q_lora_rank = args.q_lora_rank
         self.kv_lora_rank = args.kv_lora_rank
         self.qk_nope_head_dim = args.qk_nope_head_dim
@@ -418,8 +418,10 @@ class MLA(nn.Module):
         self.qk_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim #//(sf): 192 = 128 + 64
         self.v_head_dim = args.v_head_dim
 
+        #//(sf): 对Query的LoRA操作是可选的，而Key和Value总会执行LoRA操作。LoRA的降维在本地完成，而升维通过分布式完成
+        #//(sf)：Query和Key都涉及nope和rope两个embedding，而Value只有nope。因为qk_head_dim是qk_nope_head_dim与qk_rope_head_dim之和
         if self.q_lora_rank == 0:
-            self.wq = ColumnParallelLinear(self.dim, self.n_heads * self.qk_head_dim) #//(sf): dim: 7168, inter_dim = 128 * 192 = 24576
+            self.wq = ColumnParallelLinear(self.dim, self.n_heads * self.qk_head_dim) #//(sf): dim: 7168, n_heads=128, qk_head_dim=192
         else:
             self.wq_a = Linear(self.dim, self.q_lora_rank)
             self.q_norm = RMSNorm(self.q_lora_rank)
@@ -427,9 +429,10 @@ class MLA(nn.Module):
         self.wkv_a = Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim)
         self.kv_norm = RMSNorm(self.kv_lora_rank)
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
+
         self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
         self.softmax_scale = self.qk_head_dim ** -0.5
-        if args.max_seq_len > args.original_seq_len:
+        if args.max_seq_len > args.original_seq_len: #//(sf): 当前的配置下，条件成立
             mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
@@ -462,8 +465,8 @@ class MLA(nn.Module):
         q = q.view(bsz, seqlen, self.n_local_heads, self.qk_head_dim) #//(sf): 这里是n_local_heads，n_local_heads = n_heads//world_size
         q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1) #//(sf): q_nope: [B, seqlen, n_local_heads, qk_nope_head_dim], q_pe: [B, seqlen, n_local_heads, qk_rope_head_dim]
         q_pe = apply_rotary_emb(q_pe, freqs_cis) #//(sf): q_pe: [B, seqlen, n_local_heads, qk_rope_head_dim]
-        kv = self.wkv_a(x) #//(sf): kv: [B, seqlen, kv_rola_rank + qk_rope_head_dim]
-        kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv = self.wkv_a(x) #//(sf): kv: [B, seqlen, qk_rope_head_dim + kv_lora_rank]
+        kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1) #//(sf): 
         k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)
         if attn_impl == "naive":
             q = torch.cat([q_nope, q_pe], dim=-1) #//(sf): Query: [B, seqlen, n_local_heads, (qk_nope_head_dim + qk_rope_head_dim)]
@@ -782,7 +785,7 @@ class Transformer(nn.Module):
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
         seqlen = tokens.size(1) #//(sf):
-        h = self.embed(tokens) #//(sf): tokens: [B, seqlen] --> h: [B, seqlen, Dim]
+        h = self.embed(tokens) #//(sf): tokens: [B, seqlen] --> h: [B, seqlen, Dim]; 由多进程处理embedding，然后再all_reduce求和
         freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
         mask = None
         if seqlen > 1:
