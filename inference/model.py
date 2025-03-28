@@ -7,7 +7,7 @@ from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from kernel import act_quant, weight_dequant, fp8_gemm
+#from kernel import act_quant, weight_dequant, fp8_gemm
 
 
 world_size = 1
@@ -154,11 +154,12 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
         weight = weight_dequant(weight, weight.scale)
         return F.linear(x, weight, bias)
     else:
-        x, scale = act_quant(x, block_size)
-        y = fp8_gemm(x, scale, weight, weight.scale)
-        if bias is not None:
-            y += bias
-        return y
+        #x, scale = act_quant(x, block_size)
+        #y = fp8_gemm(x, scale, weight, weight.scale)
+        #if bias is not None:
+        #    y += bias
+        #return y
+        raise NotImplementedError()
 
 
 class Linear(nn.Module):
@@ -478,7 +479,7 @@ class MLA(nn.Module):
             self.v_cache[:bsz, start_pos:end_pos] = v
             scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale #//(sf): scores: [B, seqlen, n_local_heads, end_pos]
         else:
-            wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size) 
+            wkv_b = self.wkv_b.weight #if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size) 
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
             q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
             self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)

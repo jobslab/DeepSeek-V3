@@ -1,12 +1,12 @@
 from typing import Tuple
 
 import torch
-import triton
-import triton.language as tl
-from triton import Config
+#import triton
+#import triton.language as tl
+#from triton import Config
 
 
-@triton.jit
+#@triton.jit
 def act_quant_kernel(x_ptr, y_ptr, s_ptr, BLOCK_SIZE: tl.constexpr):
     """
     Quantizes the input tensor `x_ptr` and stores the result in `y_ptr` and the scaling factor in `s_ptr`.
