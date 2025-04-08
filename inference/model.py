@@ -594,8 +594,8 @@ class Gate(nn.Module):
                 group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1) #//(sf): group_scores: [B*seqlen, self.n_groups]，每组的前两个专家的分数之和 
             indices = group_scores.topk(self.topk_groups, dim=-1)[1] #//(sf): indices: [B*seqlen, top_groups], 
             mask = scores.new_ones(x.size(0), self.n_groups, dtype=bool).scatter_(1, indices, False) #//(sf): mask: [B*seqlen, n_groups]，将分数最高的n_group组置为False，从而在后面的masked_fill_中保留下来
-            scores = scores.masked_fill_(mask.unsqueeze(-1), float("-inf")).flatten(1) #//(sf): 在flatten之前，scores的shape是[B*seqlen, n_groups, n_routed_experts/n_groups]，每一group内只保留
-        indices = torch.topk(scores, self.topk, dim=-1)[1]
+            scores2 = scores.masked_fill_(mask.unsqueeze(-1), float("-inf")).flatten(1) #//(sf): 在flatten之前，scores的shape是[B*seqlen, n_groups, n_routed_experts/n_groups]，每一group内只保留
+        indices = torch.topk(scores2, self.topk, dim=-1)[1]
         weights = original_scores.gather(1, indices)
         if self.score_func == "sigmoid":
             weights /= weights.sum(dim=-1, keepdim=True)
@@ -801,8 +801,7 @@ class Transformer(nn.Module):
             logits = torch.cat(all_logits, dim=-1)
         return logits
 
-
-if __name__ == "__main__":
+def TEST_model():
     torch.set_default_dtype(torch.bfloat16)
     torch.set_default_device("cuda")
     torch.manual_seed(0)
@@ -810,3 +809,20 @@ if __name__ == "__main__":
     x = torch.randint(0, args.vocab_size, (2, 128))
     model = Transformer(args)
     print(model(x).size())
+
+
+def TEST_gate():
+    import json
+    with open("inference\\configs\\config_671B.json") as f:
+        c = f.read()
+        args = json.loads(c)
+        args = ModelArgs(**args)
+        gate = Gate(args)
+        torch.nn.init.xavier_normal_(gate.weight)
+
+        x = torch.randn(2, args.dim)
+        scores = gate(x)
+        pass
+
+if __name__ == "__main__":
+    TEST_gate()
