@@ -803,12 +803,13 @@ class Transformer(nn.Module):
 
 def TEST_model():
     torch.set_default_dtype(torch.bfloat16)
-    torch.set_default_device("cuda")
+    torch.set_default_device("cpu")
     torch.manual_seed(0)
     args = ModelArgs()
     x = torch.randint(0, args.vocab_size, (2, 128))
     model = Transformer(args)
-    print(model(x).size())
+    output = model(x)
+    print(output.size())
 
 
 def TEST_gate():
@@ -825,4 +826,5 @@ def TEST_gate():
         pass
 
 if __name__ == "__main__":
-    TEST_gate()
+    #TEST_gate()
+    TEST_model()
